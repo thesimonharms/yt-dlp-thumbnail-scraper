@@ -28,6 +28,9 @@ PREFERRED_IDS = ('maxresdefault', 'sddefault', 'hqdefault', 'mqdefault', 'defaul
 # size is treated as a placeholder and we fall back to the next candidate.
 MIN_USEFUL_BYTES = 2050
 
+# Default filename template used in --flat mode (overridable via --template).
+DEFAULT_FLAT_TEMPLATE = '{title}'
+
 
 def _log(msg: str, quiet: bool = False) -> None:
     if not quiet:
@@ -42,6 +45,24 @@ def _safe_name(name: str, fallback: str) -> str:
     return re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', name)
 
 
+def _format_template(template: str, ctx: dict) -> str:
+    """Render a `{placeholder}` template, tolerating unknown placeholders."""
+    class _Default(dict):
+        def __missing__(self, key: str) -> str:
+            return ''
+
+    try:
+        return template.format_map(_Default(ctx))
+    except (IndexError, ValueError):
+        # Malformed format spec — fall back to a naive literal substitution so
+        # the run still produces *something* usable instead of crashing.
+        out = template
+        for k, v in ctx.items():
+            out = out.replace('{' + k + '}', str(v))
+        return out
+
+
+
 class ThumbnailScraper:
     """Download thumbnails for a YouTube video, channel, or playlist."""
 
@@ -53,6 +74,9 @@ class ThumbnailScraper:
         quiet: bool = False,
         retries: int = 3,
         sleep_between: float = 0.0,
+        flat: bool = False,
+        filename_template: str | None = None,
+        limit: int | None = None,
     ) -> None:
         self.out_dir = Path(out_dir)
         self.all_thumbnails = all_thumbnails
@@ -60,6 +84,12 @@ class ThumbnailScraper:
         self.quiet = quiet
         self.retries = retries
         self.sleep_between = sleep_between
+        # `--template` implies flat output (custom names belong in a single dir).
+        self.filename_template = filename_template or (DEFAULT_FLAT_TEMPLATE if flat else None)
+        self.flat = bool(self.filename_template) if filename_template else flat
+        self.limit = limit if (limit and limit > 0) else None
+        # Track names claimed during this run to de-duplicate within a batch.
+        self._used_names: set[str] = set()
 
     # Public API ---------------------------------------------------------
 
@@ -106,28 +136,51 @@ class ThumbnailScraper:
 
     # Processing --------------------------------------------------------
 
+    def _root_name(self, info: dict) -> str:
+        return _safe_name(
+            info.get('channel') or info.get('uploader') or info.get('title') or info.get('id') or 'thumbnails',
+            fallback=str(info.get('id') or 'thumbnails'),
+        )
+
     def _process_video(self, url: str) -> int:
         info = self._extract_flat(url)
         if not info:
             _log(f"ERROR: no info extracted for {url}", self.quiet)
             return 1
-        return self._download_thumbnails(info, parent_dir=self.out_dir)
+        if self.flat:
+            name = self._flat_name(info, info, idx=1)
+            return self._download_thumbnails(info, parent_dir=self.out_dir, name=name)
+        return self._download_thumbnails(info, parent_dir=self.out_dir, name='thumbnail')
 
     def _process_many(self, url: str) -> int:
         info = self._extract_flat(url)
         entries = list(self._entries(info))
+        if self.limit:
+            entries = entries[: self.limit]
         if not entries:
             _log(f"ERROR: no videos found for {url}", self.quiet)
             return 1
         _log(f"Found {len(entries)} videos.", self.quiet)
 
-        # Use channel/playlist name as root, then create dir for each.
-        root_name = _safe_name(
-            info.get('channel') or info.get('uploader') or info.get('title') or info.get('id') or 'thumbnails',
-            fallback=str(info.get('id') or 'thumbnails'),
-        )
-        root_dir = self.out_dir / root_name
+        root_name = self._root_name(info)
 
+        if self.flat:
+            total_ok = 0
+            for i, entry in enumerate(entries, 1):
+                vid = entry.get('id') or entry.get('url')
+                if not vid:
+                    continue
+                title = entry.get('title') or vid
+                name = self._flat_name(entry, info, idx=i)
+                _log(f"[{i}/{len(entries)}] {title} [{vid}]")
+                total_ok += self._download_thumbnails(entry, parent_dir=self.out_dir, name=name)
+                if self.sleep_between:
+                    time.sleep(self.sleep_between)
+            _log(f"Done. {total_ok} thumbnails saved under {self.out_dir}", self.quiet)
+            return 0
+
+        # Default nested layout: <root>/<uploader?>/<title> [<id>]/thumbnail.*.
+        root_dir = self.out_dir / root_name
         total_ok = 0
         for i, entry in enumerate(entries, 1):
             vid = entry.get('id') or entry.get('url')
@@ -143,11 +196,65 @@ class ThumbnailScraper:
             else:
                 sub_dir = root_dir / uploader_name / video_dir
             _log(f"[{i}/{len(entries)}] {title} [{vid}]")
-            total_ok += self._download_thumbnails(entry, parent_dir=sub_dir)
+            total_ok += self._download_thumbnails(entry, parent_dir=sub_dir, name='thumbnail')
             if self.sleep_between:
                 time.sleep(self.sleep_between)
         _log(f"Done. {total_ok} thumbnails saved under {root_dir}", self.quiet)
         return 0
+
+    # Flat / template naming --------------------------------------------
+
+    def _flat_name(self, entry: dict, info: dict, idx: int) -> str:
+        template = self.filename_template or DEFAULT_FLAT_TEMPLATE
+        vid = entry.get('id') or entry.get('url') or ''
+        title = entry.get('title') or info.get('title') or vid or 'thumbnail'
+        ctx = {
+            'title': title,
+            'id': vid,
+            'uploader': entry.get('uploader') or info.get('channel') or info.get('uploader') or 'unknown',
+            'channel': info.get('channel') or info.get('uploader') or self._root_name(info),
+            'playlist': info.get('title') or info.get('channel') or info.get('uploader') or 'thumbnails',
+            'idx': idx,
+        }
+        raw = _format_template(template, ctx)
+        safe = _safe_name(raw, fallback=vid or 'thumbnail')
+        # A rendered template may leave a trailing dot or be empty after
+        # sanitizing; fall back to the video id so we never write nameless files.
+        if not safe or safe in ('.', '..'):
+            safe = _safe_name(vid, 'thumbnail')
+        return self._unique_name(safe, vid)
+
+    def _unique_name(self, base: str, vid: str) -> str:
+        """Pick a non-colliding basename, reusing existing files when safe."""
+        path = self.out_dir / base
+
+        # 1. Prefer the [<vid>] variant if it already exists — the previous run
+        #    already disambiguated to it, so reuse and let skip-existing fire.
+        if vid:
+            vid_name = f"{base} [{vid}]"
+            if (self.out_dir / vid_name).exists() or vid_name in self._used_names:
+                self._used_names.add(vid_name)
+                return vid_name
+
+        # 2. Plain title name is free — take it.
+        if not (path.exists() or base in self._used_names):
+            self._used_names.add(base)
+            return base
+
+        # 3. Collision with a different file: try [<vid>] first, then numeric.
+        if vid:
+            cand = f"{base} [{vid}]"
+            if not ((self.out_dir / cand).exists() or cand in self._used_names):
+                self._used_names.add(cand)
+                return cand
+
+        i = 2
+        while True:
+            cand = f"{base} ({i})"
+            if not ((self.out_dir / cand).exists() or cand in self._used_names):
+                self._used_names.add(cand)
+                return cand
+            i += 1
 
     # Downloading -------------------------------------------------------
 
@@ -169,7 +276,7 @@ class ThumbnailScraper:
             return (-int(t.get('width') or 0), pref)
         return sorted(thumbs, key=rank)
 
-    def _download_thumbnails(self, entry: dict, parent_dir: Path) -> int:
+    def _download_thumbnails(self, entry: dict, parent_dir: Path, name: str = 'thumbnail') -> int:
         thumbs = self._pick_thumbnails(entry)
         if not thumbs:
             _log(f"  no thumbnails available for {entry.get('id', '?')}", self.quiet)
@@ -178,16 +285,16 @@ class ThumbnailScraper:
         count = 0
         if self.all_thumbnails:
             for i, t in enumerate(thumbs):
-                count += self._save_one(t, parent_dir, f"thumbnail_{i:02d}")
+                count += self._save_one(t, parent_dir, f"{name}_{i:02d}")
             return count
 
         # Best-one mode: try candidates best-first, accept the first non-placeholder.
         for t in thumbs:
-            ok = self._save_one(t, parent_dir, 'thumbnail', require_useful=True)
+            ok = self._save_one(t, parent_dir, name, require_useful=True)
             if ok:
                 return 1
             # else: clean up the placeholder attempt and try next candidate
-            for f in parent_dir.glob('thumbnail.*'):
+            for f in parent_dir.glob(f"{name}.*"):
                 try:
                     if f.stat().st_size < MIN_USEFUL_BYTES:
                         f.unlink()

@@ -28,6 +28,27 @@ def build_parser() -> argparse.ArgumentParser:
         help='Download every available thumbnail per video, not just the best one',
     )
     p.add_argument(
+        '-f', '--flat', action='store_true',
+        help=(
+            'Save every thumbnail directly inside the output directory, named '
+            'after the video title (no per-video subdirectories). Combine with '
+            '-o . to drop them in the current directory.'
+        ),
+    )
+    p.add_argument(
+        '--template', metavar='TEMPLATE', default=None,
+        help=(
+            'Custom filename template in --flat mode. Implies --flat. '
+            'Placeholders: {title}, {id}, {uploader}, {channel}, {playlist}, '
+            '{idx}. Example: "{idx:03d} - {title}". Collisions are '
+            'automatically disambiguated with the video id.'
+        ),
+    )
+    p.add_argument(
+        '--limit', type=int, default=None,
+        help='Process at most N videos when scraping a channel/playlist',
+    )
+    p.add_argument(
         '--no-skip-existing', dest='skip_existing', action='store_false',
         help='Re-download thumbnails that already exist on disk',
     )
@@ -56,6 +77,9 @@ def main(argv: list[str] | None = None) -> int:
         quiet=args.quiet,
         retries=args.retries,
         sleep_between=args.sleep,
+        flat=args.flat,
+        filename_template=args.template,
+        limit=args.limit,
     )
     return scraper.run(args.url)
 

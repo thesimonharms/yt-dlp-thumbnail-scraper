@@ -10,6 +10,9 @@ data.
 - Picks the highest-resolution thumbnail available, automatically skipping
   YouTube's gray placeholder image when `maxresdefault` is missing.
 - Optional `--all` mode grabs every thumbnail variant per video.
+- `--flat` mode drops every thumbnail into one directory named after the video
+  title; `--template` lets you customize that filename.
+- `--limit N` caps how many videos a channel/playlist scrape processes.
 - Resumable: existing thumbnails are skipped by default.
 - Retries failed downloads and can sleep between videos to be polite to
   YouTube when scraping large channels.
@@ -132,6 +135,61 @@ etc.):
 yt-thumb --all https://www.youtube.com/@SomeChannel
 ```
 
+### Flat output: one directory, named by video title
+
+Use `--flat` to discard the per-video subdirectory layout and write every
+thumbnail directly into the output directory, named after the video title:
+
+```bash
+yt-thumb --flat https://www.youtube.com/@SomeChannel
+# drop them in the current working directory:
+yt-thumb --flat -o . https://www.youtube.com/@SomeChannel
+```
+
+```
+thumbnails/
+├── <video title>.jpg
+├── <another video title>.jpg
+└── ...
+```
+
+Collisions are handled automatically: if two videos share a title, the second
+one is written as `<title> [<video id>].jpg`. Re-runs reuse the previously
+written file (and skip the download) thanks to `--skip-existing`.
+
+With `--all --flat`, each video's variants are written as
+`<title>_00.<ext>`, `<title>_01.<ext>`, ...
+
+### Custom filename template (`--template`)
+
+`--template` selects your own filename in flat mode (it implies `--flat`).
+Available placeholders:
+
+| Placeholder   | Meaning                                              |
+|---------------|------------------------------------------------------|
+| `{title}`     | Video title                                          |
+| `{id}`        | Video id                                             |
+| `{uploader}`  | The video's uploader                                 |
+| `{channel}`   | Channel (or uploader) of the source page            |
+| `{playlist}`  | Channel or playlist display name                     |
+| `{idx}`       | 1-based index of the video within this scrape        |
+
+Standard `str.format` format specs work, e.g. `{idx:03d}`.
+
+```bash
+yt-thumb --template "{idx:03d} - {title}" https://www.youtube.com/@SomeChannel
+yt-thumb --template "{uploader} - {title} [{id}]" "https://www.youtube.com/playlist?list=PLxxxx"
+```
+
+### Limit how many videos are scraped
+
+`--limit N` stops after processing `N` videos from a channel or playlist —
+handy for sampling a large channel or quickly testing a setup:
+
+```bash
+yt-thumb --limit 10 https://www.youtube.com/@SomeChannel
+```
+
 ### Custom output directory
 
 ```bash
@@ -174,20 +232,28 @@ yt-thumb --retries 5 https://www.youtube.com/@SomeChannel
 ### Combine options
 
 ```bash
+# Nested layout with every variant, polite throttling
 yt-thumb \
   --output ./out \
   --all \
   --sleep 0.25 \
   --retries 5 \
   https://www.youtube.com/@SomeChannel
+
+# Flat layout, custom names, sample of 50 videos
+yt-thumb \
+  --output ./out \
+  --flat --template "{idx:03d} - {title}" \
+  --limit 50 \
+  https://www.youtube.com/@SomeChannel
 ```
 
 ## Command reference
 
 ```
-yt-thumb [-h] [-o OUTPUT] [-a] [--no-skip-existing] [-q]
-         [--retries RETRIES] [--sleep SLEEP] [--version]
-         url
+yt-thumb [-h] [-o OUTPUT] [-a] [-f] [--template TEMPLATE] [--limit N]
+         [--no-skip-existing] [-q] [--retries RETRIES] [--sleep SLEEP]
+         [--version] url
 
 positional arguments:
   url                   YouTube video, channel, or playlist URL
@@ -197,6 +263,13 @@ options:
   -o, --output DIR      Output directory (default: ./thumbnails)
   -a, --all             Download every available thumbnail per video,
                         not just the best one
+  -f, --flat            Save every thumbnail directly inside the output
+                        directory, named after the video title
+  --template TEMPLATE   Custom filename template in --flat mode (implies
+                        --flat). Placeholders: {title}, {id}, {uploader},
+                        {channel}, {playlist}, {idx}
+  --limit N             Process at most N videos when scraping a
+                        channel/playlist
   --no-skip-existing    Re-download thumbnails that already exist on disk
   -q, --quiet           Suppress progress output
   --retries N           Number of download retries per thumbnail (default: 3)
@@ -243,6 +316,18 @@ With `--all`, each video directory contains multiple files:
 ├── thumbnail_02.jpg
 └── ...
 ```
+
+### Flat mode (`--flat` / `--template`)
+
+```
+thumbnails/
+├── <video title>.jpg
+├── <another video title>.jpg
+└── ...
+```
+
+Collisions are disambiguated with the video id (e.g. `<title> [dQw4w9WgXcQ].jpg`).
+With `--all --flat`, variants become `<title>_00.jpg`, `<title>_01.webp`, ...
 
 ## How it works
 
