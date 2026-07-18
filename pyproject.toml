@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yt-dlp-thumbnail-scraper"
+version = "1.0.0"
+description = "Download all thumbnails from a YouTube channel or a single video using yt-dlp"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Simon" }]
+keywords = ["yt-dlp", "youtube", "thumbnail", "scraper", "downloader"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Multimedia :: Video",
+]
+dependencies = [
+    "yt-dlp>=2024.1.0",
+]
+
+[project.scripts]
+yt-thumb = "yt_dlp_thumbnail_scraper.cli:main"
+yt-dlp-thumbnails = "yt_dlp_thumbnail_scraper.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/thesimonharms/yt-dlp-thumbnail-scraper"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["yt_dlp_thumbnail_scraper*"]
